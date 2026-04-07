@@ -71,6 +71,9 @@ terraform destroy
 ### Security Group
 ![SG](Screenshots/security-group.png)
 
+### S3 Remote Backend
+![S3](Screenshots/s3-backend.png)
+
 ## Outputs
 After `terraform apply`, these values are displayed:
 - `vpc_id` — ID of the created VPC
