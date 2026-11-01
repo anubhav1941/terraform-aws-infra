@@ -1,0 +1,11 @@
+#!/bin/bash
+# Serve a one-line page so a successful apply can be checked with curl.
+set -euo pipefail
+dnf install -y nginx
+cat > /usr/share/nginx/html/index.html <<'HTML'
+<!doctype html>
+<title>tf-aws-infra</title>
+<h1>tf-aws-infra: ${environment}</h1>
+<p>Provisioned with Terraform.</p>
+HTML
+systemctl enable --now nginx
