@@ -1,83 +1,112 @@
 <div align="center">
 
-# ☁️ AWS Infrastructure Provisioning with Terraform
+# ☁️ AWS Infrastructure with Terraform
 
-**A VPC, public subnet, routing, security group and EC2 instance on AWS, built with one `terraform apply` and stored in an S3 remote state backend.**
+**Reusable `network` and `compute` modules, separate `dev` and `prod` environments, and remote state in S3 with DynamoDB locking. Formatted, validated, linted and unit-tested in GitHub Actions on every push.**
 
 ![Terraform](https://img.shields.io/badge/Terraform-IaC-7B42BC?style=flat-square&logo=terraform&logoColor=white)
-![AWS](https://img.shields.io/badge/AWS-VPC%20%7C%20EC2%20%7C%20S3-FF9900?style=flat-square&logo=amazonaws&logoColor=white)
+![AWS](https://img.shields.io/badge/AWS-VPC%20%7C%20EC2%20%7C%20S3%20%7C%20DynamoDB-FF9900?style=flat-square&logo=amazonaws&logoColor=white)
 ![AWS Provider](https://img.shields.io/badge/hashicorp%2Faws-~%3E%205.0-844FBA?style=flat-square)
+[![terraform](https://github.com/anubhav1941/terraform-aws-infra/actions/workflows/terraform.yml/badge.svg)](https://github.com/anubhav1941/terraform-aws-infra/actions/workflows/terraform.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
 
 </div>
 
 ## 📌 Overview
-This project provisions an AWS network and compute stack entirely with Terraform. No resources are created by clicking through the AWS Console. State is stored in an S3 backend, so it survives local machine loss and stays consistent between runs.
+One codebase, two environments. `dev` and `prod` call the same modules with different CIDRs and instance sizes, and each keeps its own state file in a shared S3 bucket. A DynamoDB table locks the state, so two `terraform apply` runs can never change the same environment at once. The bucket and the table are themselves created by Terraform, in a small `bootstrap` stack.
 
 ## 🏗️ Architecture
 
 ```mermaid
 flowchart LR
-    user([👤 User / SSH client]) -->|SSH :22 · HTTP :80| igw[Internet Gateway]
-    subgraph aws[AWS · us-east-1]
-        subgraph vpc[VPC 10.0.0.0/16]
-            igw --> rt[Route table<br/>0.0.0.0/0 → IGW]
-            rt --> subnet
-            subgraph subnet[Public subnet 10.0.1.0/24]
-                sg{{Security group<br/>22, 80 in · all out}} --- ec2[EC2 · Amazon Linux 2<br/>t2.micro]
+    tf[[Terraform CLI]] -->|state| s3[(S3 state bucket<br/>versioned · encrypted · TLS only)]
+    tf -->|lock| ddb[(DynamoDB<br/>LockID table)]
+    tf -->|provisions| vpc
+    user([👤 Browser]) -->|HTTP :80| igw[Internet Gateway]
+    subgraph aws[AWS · us-east-1 · one VPC per environment]
+        subgraph vpc[VPC  dev 10.0.0.0/16 · prod 10.1.0.0/16]
+            igw --> pub
+            subgraph pub[Public subnets · AZ a + b]
+                sg{{Security group<br/>80 in · SSH closed}} --- ec2[EC2 · Amazon Linux 2023<br/>IMDSv2 · encrypted gp3]
+            end
+            subgraph priv[Private subnets · AZ a + b]
+                app[(app / data tier)]
             end
         end
-        s3[(S3 bucket<br/>Terraform remote state)]
     end
-    tf[[Terraform CLI]] -.->|state| s3
-    tf -.->|provisions| vpc
+    ssm([AWS SSM Session Manager]) -.->|shell, no port 22| ec2
 ```
 
-| Resource | Details |
+| Piece | What it does |
 |---|---|
-| **VPC** | Isolated network, CIDR `10.0.0.0/16` |
-| **Public subnet** | `10.0.1.0/24`, auto-assigns public IPs |
-| **Internet gateway** | Gives the VPC internet access |
-| **Route table** | Sends `0.0.0.0/0` through the IGW, associated with the public subnet |
-| **Security group** | Inbound SSH (22) and HTTP (80), all outbound |
-| **EC2 instance** | Amazon Linux 2, `t2.micro` |
-| **S3 backend** | Remote Terraform state |
+| **`modules/network`** | VPC, public and private subnets across two AZs, internet gateway, route tables. Optional single NAT gateway (`enable_nat_gateway`, off by default because it's billed hourly). |
+| **`modules/compute`** | Security group (HTTP in, SSH closed unless you pass a `/32`), EC2 on the latest Amazon Linux 2023 AMI, IMDSv2 required, encrypted gp3 root volume, IAM role for SSM Session Manager, nginx test page via user data. |
+| **`envs/dev`, `envs/prod`** | Thin root modules: same modules, different values (`10.0.0.0/16` + `t3.micro` vs `10.1.0.0/16` + `t3.small`), separate state keys. |
+| **`bootstrap`** | The S3 state bucket (versioning, encryption, public access blocked, TLS-only policy, old versions expire after 90 days) and the DynamoDB lock table (on-demand, point-in-time recovery). |
 
 ## 📁 Project structure
 ```
 terraform-aws-infra/
-├── provider.tf      # AWS provider and Terraform version constraints
-├── variables.tf     # Input variables (region, CIDRs, AMI, instance type, ...)
-├── main.tf          # VPC, subnet, IGW, route table, security group, EC2
-├── outputs.tf       # VPC ID, subnet ID, EC2 ID / public IP, SG ID
-├── backend.tf       # S3 remote state backend
-└── Screenshots/     # AWS Console verification
+├── bootstrap/                 # one-time: state bucket + lock table (local state)
+├── modules/
+│   ├── network/               # VPC, subnets, IGW, routes, optional NAT
+│   │   └── tests/             # terraform test, AWS provider mocked
+│   └── compute/               # SG, IAM role, EC2
+│       └── tests/
+├── envs/
+│   ├── dev/                   # backend.hcl, main.tf, outputs.tf, ...
+│   └── prod/
+├── .github/workflows/terraform.yml   # fmt · validate · test · tflint
+├── .tflint.hcl
+└── Screenshots/               # AWS Console verification (v1, single environment)
 ```
 
 ## 🚀 Usage
 
-**Prerequisites:** Terraform, the AWS CLI configured with `aws configure`, and an IAM user allowed to manage VPC/EC2/S3.
+**Prerequisites:** Terraform ≥ 1.5 (≥ 1.7 to run the tests), the AWS CLI configured with `aws configure`, and an IAM user allowed to manage VPC, EC2, IAM, S3 and DynamoDB.
 
-> The S3 bucket in `backend.tf` must already exist. If you're using your own AWS account, change `bucket` to a bucket you own.
-
+**1. Create the state backend (once).** The bucket name must be globally unique: change `state_bucket_name` in `bootstrap/variables.tf` and `bucket` in `envs/*/backend.hcl` if you use your own account.
 ```bash
-terraform init      # download the provider, connect to the S3 backend
-terraform plan      # preview the changes
-terraform apply     # create the infrastructure
-terraform destroy   # tear everything down
+cd bootstrap
+terraform init
+terraform apply
 ```
+If the bucket already exists (it did for v1 of this repo), adopt it instead of creating it:
+`terraform import aws_s3_bucket.state <bucket-name>`, then `terraform apply`.
 
-After `apply`, Terraform prints these outputs:
+**2. Deploy an environment.**
+```bash
+cd envs/dev
+terraform init -backend-config=backend.hcl
+terraform plan
+terraform apply
+curl "$(terraform output -raw web_url)"     # nginx page: "tf-aws-infra: dev"
+```
+Same steps in `envs/prod`. Shell access without SSH: `aws ssm start-session --target "$(terraform output -raw ec2_instance_id)"`.
 
-| Output | Description |
+**3. Tear down** with `terraform destroy` in each environment. The bootstrap bucket has `prevent_destroy` set on purpose.
+
+## ✅ Checks (CI and local)
+| Check | Command |
 |---|---|
-| `vpc_id` | ID of the VPC |
-| `subnet_id` | ID of the public subnet |
-| `ec2_instance_id` | ID of the EC2 instance |
-| `ec2_public_ip` | Public IP of the EC2 instance |
-| `security_group_id` | ID of the security group |
+| Formatting | `terraform fmt -check -recursive` |
+| Validation (bootstrap, dev, prod) | `terraform init -backend=false && terraform validate` |
+| Unit tests (offline, provider mocked) | `cd modules/network && terraform init -backend=false && terraform test` |
+| Lint | `tflint --init && tflint --recursive` |
 
-## 📸 Screenshots
+The tests assert the important behaviour without touching AWS: one public and one private subnet per AZ, no NAT unless asked, IMDSv2 required, an encrypted root volume, SSH closed by default, and SSH from `0.0.0.0/0` rejected.
+
+## 🔐 A note on state locking
+DynamoDB is the long-standing way to lock S3 state, and what most existing setups use. Terraform 1.10 added native S3 locking (`use_lockfile = true`) and from 1.11 marks `dynamodb_table` as deprecated, so `terraform init` prints a deprecation warning on recent versions. Migrating is one change per environment: add `use_lockfile = true` to `backend.hcl`, run `terraform init -reconfigure` while both locks are active, then remove `dynamodb_table` and the table.
+
+## 🛠️ Troubleshooting: orphaned route tables
+**Issue:** After an incomplete `terraform destroy`, several route tables showed `Main = Yes`.
+
+**Cause:** Terraform state was out of sync. The partial destroy left orphaned VPCs whose route tables were still the main tables.
+
+**Fix:** Found the orphaned VPCs in the AWS Console, deleted their dependent resources manually, then ran `terraform destroy` to clean up the remaining state. Remote state in S3 (and now locking) keeps state consistent between runs.
+
+## 📸 Screenshots (v1, single environment)
 
 | EC2 instance running | VPC created |
 |---|---|
@@ -94,21 +123,11 @@ After `apply`, Terraform prints these outputs:
 
 </details>
 
-## 🛠️ Troubleshooting: orphaned route tables
-**Issue:** After an incomplete `terraform destroy`, several route tables showed `Main = Yes`.
-
-**Cause:** Terraform state was out of sync. The partial destroy left orphaned VPCs whose route tables were still the main tables.
-
-**Fix:** Found the orphaned VPCs in the AWS Console, deleted their dependent resources manually, then ran `terraform destroy` to clean up the remaining state. The S3 remote backend now keeps state consistent between runs.
-
-## 🔭 Possible next steps
-- Restrict SSH (port 22) to a known CIDR instead of `0.0.0.0/0`, or use SSM Session Manager instead of SSH.
-- Add DynamoDB state locking to the S3 backend.
-- Split the code into reusable `network` and `compute` modules.
-- Run `terraform fmt -check` and `terraform validate` in GitHub Actions.
+## 💰 Cost
+Idle cost is close to zero: the lock table is on-demand and the state bucket holds a few KB. Each environment runs one small EC2 instance while it's up. A NAT gateway is the expensive part of a VPC, so it's off unless you enable it. Destroy environments when you're done.
 
 ## 🧰 Tech stack
-Terraform · AWS VPC · EC2 · S3 · IAM · Linux
+Terraform · AWS VPC · EC2 · IAM · SSM · S3 · DynamoDB · GitHub Actions · TFLint
 
 ## 📄 License
 [MIT](LICENSE) © Anubhav Arora
